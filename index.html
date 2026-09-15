@@ -385,17 +385,94 @@
     padding: 30px 24px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
   }
-  .player-btn-group{ display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+  .episode-row.is-watched{
+    opacity: 0.65;
+  }
+  .episode-row.is-watched .ep-title{
+    text-decoration: line-through;
+    color: var(--text-dim);
+  }
+  .icon-btn.check{
+    color: var(--text-dim);
+  }
+  .icon-btn.check.active{
+    color: #4cd964;
+    border-color: rgba(76, 217, 100, 0.4);
+    background: rgba(76, 217, 100, 0.12);
+  }
+  .continue-badge{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(232, 163, 61, 0.15);
+    border: 1px solid rgba(232, 163, 61, 0.4);
+    color: var(--amber);
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease;
+  }
+  .continue-badge:hover{
+    background: rgba(232, 163, 61, 0.28);
+  }
 
-  /* Subtítulos personalizados (WebVTT) */
+  /* Subtítulos personalizados (WebVTT) con selector de tamaño */
   video::cue {
-    background: rgba(10, 11, 16, 0.85);
+    background: rgba(10, 11, 16, 0.88);
     color: #ffffff;
     font-family: 'Inter', system-ui, sans-serif;
-    font-size: 1.15rem;
-    font-weight: 500;
-    line-height: 1.4;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+    font-weight: 600;
+    line-height: 1.35;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.95);
+    font-size: 2.3rem; /* Extra grande por defecto (+100%) */
+  }
+  .sub-size-normal video::cue { font-size: 1.25rem; }
+  .sub-size-large video::cue { font-size: 1.75rem; }
+  .sub-size-xlarge video::cue { font-size: 2.3rem; }
+  .sub-size-huge video::cue { font-size: 2.9rem; }
+
+  /* Overlay de cuenta regresiva y auto-reproducción */
+  .next-ep-card{
+    position: absolute;
+    bottom: 30px;
+    right: 30px;
+    background: rgba(28, 31, 43, 0.95);
+    border: 1px solid var(--amber);
+    border-radius: 10px;
+    padding: 16px 20px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.75);
+    backdrop-filter: blur(8px);
+    z-index: 220;
+    max-width: 360px;
+    animation: slideUp .2s ease-out;
+  }
+  @keyframes slideUp{
+    from{ opacity: 0; transform: translateY(12px); }
+    to{ opacity: 1; transform: translateY(0); }
+  }
+  .next-ep-card .title{
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .next-ep-card .ep-name{
+    font-size: 0.96rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  .next-ep-card .actions{
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+  .countdown-pill{
+    color: var(--amber);
+    font-weight: 700;
   }
 
   .player-drop-hint{
@@ -586,12 +663,17 @@
         seasons[ep.season].push(ep);
       });
 
+      // Buscar primer episodio no visto para botón "Continuar viendo"
+      const nextUnwatched = episodes.find(e => !e.watched);
+
       body = `<div class="filmstrip">`;
       Object.keys(seasons).sort((a,b)=>a-b).forEach(seasonNum => {
         body += `<div class="season-row"><span class="sprocket"></span> TEMPORADA ${seasonNum}</div>`;
         seasons[seasonNum].forEach(ep => {
+          const isWatched = !!ep.watched;
           body += `
-            <div class="episode-row">
+            <div class="episode-row ${isWatched ? 'is-watched' : ''}">
+              <button class="icon-btn check ${isWatched ? 'active' : ''}" title="${isWatched ? 'Marcar como no visto' : 'Marcar como visto'}" data-action="toggle-watched" data-id="${item.id}" data-ep="${ep.id}">${icon('check')}</button>
               <span class="ep-num">E${String(ep.episode).padStart(2,'0')}</span>
               <span class="ep-title">${escapeHtml(item.title)} · S${ep.season}E${ep.episode}</span>
               <div class="ep-actions">
@@ -623,12 +705,21 @@
         </div>`;
     }
 
+    const nextUnwatched = (isSeries && item.episodes) ? item.episodes.slice().sort((a,b)=>a.season-b.season || a.episode-b.episode).find(e => !e.watched) : null;
+
     return `
       <div class="expand-panel">
         <div class="expand-head">
           <div>
-            <h2>${escapeHtml(item.title)}</h2>
-            <span class="badge ${isSeries ? 'badge-series':'badge-movie'}">${isSeries ? 'Serie' : 'Película'}</span>
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+              <h2 style="margin:0;">${escapeHtml(item.title)}</h2>
+              <span class="badge ${isSeries ? 'badge-series':'badge-movie'}">${isSeries ? 'Serie' : 'Película'}</span>
+            </div>
+            ${nextUnwatched ? `
+              <div class="continue-badge" data-action="play-ep" data-id="${item.id}" data-ep="${nextUnwatched.id}" title="Continuar reproducción">
+                ${icon('play')} Continuar viendo: S${nextUnwatched.season}E${nextUnwatched.episode}
+              </div>
+            ` : ''}
           </div>
           <div class="expand-head-actions">
             <button class="btn btn-sm btn-ghost" data-action="edit-item" data-id="${item.id}">Editar</button>
@@ -643,6 +734,7 @@
     const icons = {
       play: '<svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M6 4.5L19 12L6 19.5V4.5Z" fill="currentColor"/></svg>',
       spark: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+      check: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"/></svg>',
       edit: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
       trash: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>',
       close: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>',
@@ -671,6 +763,7 @@
     bindAction('import-torrent-ep', (id) => openTorrentImportModal(id));
     bindAction('edit-ep', (id, epId) => openEpisodeModal(id, epId));
     bindAction('delete-ep', (id, epId) => confirmDeleteEpisode(id, epId));
+    bindAction('toggle-watched', (id, epId) => toggleWatched(id, epId));
   }
 
   function bindAction(action, handler){
@@ -686,6 +779,28 @@
   function findEpisode(itemId, epId){
     const item = findItem(itemId);
     return item ? (item.episodes||[]).find(ep => ep.id === epId) : null;
+  }
+
+  function findNextEpisode(itemId, epId){
+    const item = findItem(itemId);
+    if(!item || !item.episodes) return null;
+    const episodes = item.episodes.slice().sort((a,b)=> a.season - b.season || a.episode - b.episode);
+    const currentIndex = episodes.findIndex(ep => ep.id === epId);
+    if(currentIndex >= 0 && currentIndex < episodes.length - 1){
+      return episodes[currentIndex + 1];
+    }
+    return null;
+  }
+
+  function toggleWatched(itemId, epId, forceState = null){
+    const ep = findEpisode(itemId, epId);
+    if(!ep) return;
+    ep.watched = forceState !== null ? forceState : !ep.watched;
+    saveLibrary();
+    render();
+    if(forceState === null){
+      showToast(ep.watched ? `Episodio S${ep.season}E${ep.episode} marcado como visto` : `Episodio S${ep.season}E${ep.episode} marcado como no visto`);
+    }
   }
 
   /* ============ modal: crear/editar Serie o Película ============ */
@@ -1323,10 +1438,10 @@
     const item = findItem(itemId);
     const ep = findEpisode(itemId, epId);
     if(!item || !ep) return;
-    openPlayer(ep.torrent, `${item.title} · S${ep.season}E${ep.episode}`, ep.subtitle);
+    openPlayer(ep.torrent, `${item.title} · S${ep.season}E${ep.episode}`, ep.subtitle, { itemId, epId });
   }
 
-  function openPlayer(streamUri, label, initialSubtitle = ""){
+  function openPlayer(streamUri, label, initialSubtitle = "", context = null){
     streamUri = (streamUri || '').trim();
     if(!streamUri){
       showToast("No hay enlace de streaming configurado", true);
@@ -1346,7 +1461,8 @@
             <span class="player-tag ${isHttp ? 'http':'webtorrent'}">${isHttp ? 'HTTP Stream' : 'WebTorrent'}</span>
           </div>
           <div class="player-top-actions">
-            <button class="btn btn-sm btn-ghost" id="playerBtnSub" title="Cargar subtítulo desde tu computadora (.srt o .vtt)">${icon('cc')} Subtítulos</button>
+            <button class="btn btn-sm btn-ghost" id="playerBtnSubSize" title="Cambiar tamaño de subtítulos">${icon('spark')} Subtítulos: <span id="subSizeLabel">Extra (+100%)</span></button>
+            <button class="btn btn-sm btn-ghost" id="playerBtnSub" title="Cargar subtítulo desde tu computadora (.srt o .vtt)">${icon('cc')} Archivo</button>
             <button class="btn btn-sm btn-ghost" id="playerBtnCopy" title="Copiar enlace">${icon('copy')} Copiar URL</button>
             <button class="btn btn-sm btn-ghost" id="playerBtnVlc" title="Descargar .m3u para VLC o reproductor externo">${icon('external')} Abrir en VLC</button>
             <button class="icon-btn" id="playerClose" title="Cerrar">${icon('close')}</button>
@@ -1366,6 +1482,37 @@
         </div>
       </div>`;
 
+    const overlay = document.getElementById("playerOverlay");
+
+    // Configuración y alternancia de tamaño de subtítulos
+    const SUB_SIZES = [
+      { id: 'normal', label: 'Normal' },
+      { id: 'large', label: 'Grande' },
+      { id: 'xlarge', label: 'Extra (+100%)' },
+      { id: 'huge', label: 'Enorme' }
+    ];
+    let currentSubSize = localStorage.getItem("marquesina_sub_size") || "xlarge";
+    const applySubSize = (sizeId) => {
+      SUB_SIZES.forEach(s => overlay.classList.remove(`sub-size-${s.id}`));
+      overlay.classList.add(`sub-size-${sizeId}`);
+      const lbl = document.getElementById("subSizeLabel");
+      const found = SUB_SIZES.find(s => s.id === sizeId) || SUB_SIZES[2];
+      if(lbl) lbl.textContent = found.label;
+    };
+    applySubSize(currentSubSize);
+
+    const btnSubSize = document.getElementById("playerBtnSubSize");
+    if(btnSubSize){
+      btnSubSize.addEventListener('click', () => {
+        const idx = SUB_SIZES.findIndex(s => s.id === currentSubSize);
+        const nextIdx = (idx + 1) % SUB_SIZES.length;
+        currentSubSize = SUB_SIZES[nextIdx].id;
+        localStorage.setItem("marquesina_sub_size", currentSubSize);
+        applySubSize(currentSubSize);
+        showToast(`Tamaño de subtítulos: ${SUB_SIZES[nextIdx].label}`);
+      });
+    }
+
     document.getElementById("playerClose").addEventListener('click', closePlayer);
     document.getElementById("playerBtnCopy").addEventListener('click', () => copyToClipboard(streamUri));
     document.getElementById("playerBtnVlc").addEventListener('click', () => launchInExternalPlayer(streamUri, label, initialSubtitle));
@@ -1382,7 +1529,6 @@
     });
 
     // Carga de subtítulos arrastrando y soltando (Drag & Drop)
-    const overlay = document.getElementById("playerOverlay");
     overlay.addEventListener('dragover', (e) => {
       e.preventDefault();
       overlay.classList.add('dragover');
@@ -1421,13 +1567,13 @@
     cleanupPlayback();
 
     if(isHttp){
-      playHttpStream(streamUri, label, initialSubtitle);
+      playHttpStream(streamUri, label, initialSubtitle, context);
     } else {
-      playWebTorrentStream(streamUri, label, initialSubtitle);
+      playWebTorrentStream(streamUri, label, initialSubtitle, context);
     }
   }
 
-  function playHttpStream(streamUri, label, initialSubtitle){
+  function playHttpStream(streamUri, label, initialSubtitle, context = null){
     const body = document.getElementById("playerBody");
     if(!body) return;
 
@@ -1470,6 +1616,96 @@
     videoEl.addEventListener('loadeddata', revealVideo);
     videoEl.addEventListener('canplay', revealVideo);
     videoEl.addEventListener('playing', revealVideo);
+
+    // Seguimiento de episodios vistos y auto-reproducción
+    let markedWatched = false;
+    let autoPlayCancelled = false;
+    let prefetchDone = false;
+    let nextEpisode = null;
+
+    if(context && context.itemId && context.epId){
+      nextEpisode = findNextEpisode(context.itemId, context.epId);
+    }
+
+    videoEl.addEventListener('timeupdate', () => {
+      if(!videoEl.duration || isNaN(videoEl.duration)) return;
+
+      // 1. Marcar como visto al superar el 90%
+      if(context && !markedWatched && (videoEl.currentTime / videoEl.duration >= 0.90)){
+        markedWatched = true;
+        toggleWatched(context.itemId, context.epId, true);
+      }
+
+      // 2. Pre-fetch y notificación en los últimos 10 segundos
+      if(context && nextEpisode && !autoPlayCancelled){
+        const remaining = videoEl.duration - videoEl.currentTime;
+        if(remaining <= 10 && remaining > 0){
+          // Pre-fetch del siguiente episodio para acelerar carga
+          if(!prefetchDone){
+            prefetchDone = true;
+            if(nextEpisode.torrent && isHttpStream(nextEpisode.torrent)){
+              const origin = (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+              const absNext = nextEpisode.torrent.startsWith('/') ? origin + nextEpisode.torrent : nextEpisode.torrent;
+              fetch(absNext, { headers: { 'Range': 'bytes=0-1048576' } }).catch(() => {});
+            }
+          }
+
+          // Mostrar u actualizar tarjeta flotante
+          let card = document.getElementById("nextEpCard");
+          const secs = Math.max(1, Math.ceil(remaining));
+          if(!card){
+            card = document.createElement("div");
+            card.id = "nextEpCard";
+            card.className = "next-ep-card";
+            card.innerHTML = `
+              <div class="title">Siguiente episodio en <span class="countdown-pill" id="nextCountdown">${secs}</span>s</div>
+              <div class="ep-name">S${nextEpisode.season}E${nextEpisode.episode}</div>
+              <div class="actions">
+                <button class="btn btn-sm btn-ghost" id="nextEpCancel">Cancelar</button>
+                <button class="btn btn-sm btn-primary" id="nextEpPlayNow">${icon('play')} Reproducir ya</button>
+              </div>
+            `;
+            const overlay = document.getElementById("playerOverlay");
+            if(overlay) overlay.appendChild(card);
+
+            const cancelBtn = document.getElementById("nextEpCancel");
+            if(cancelBtn){
+              cancelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                autoPlayCancelled = true;
+                const c = document.getElementById("nextEpCard");
+                if(c) c.remove();
+              });
+            }
+
+            const playNowBtn = document.getElementById("nextEpPlayNow");
+            if(playNowBtn){
+              playNowBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const c = document.getElementById("nextEpCard");
+                if(c) c.remove();
+                openPlayerForEpisode(context.itemId, nextEpisode.id);
+              });
+            }
+          } else {
+            const countEl = document.getElementById("nextCountdown");
+            if(countEl) countEl.textContent = secs;
+          }
+        }
+      }
+    });
+
+    videoEl.addEventListener('ended', () => {
+      if(context && !markedWatched){
+        markedWatched = true;
+        toggleWatched(context.itemId, context.epId, true);
+      }
+      if(context && nextEpisode && !autoPlayCancelled){
+        const card = document.getElementById("nextEpCard");
+        if(card) card.remove();
+        openPlayerForEpisode(context.itemId, nextEpisode.id);
+      }
+    });
 
     let triedOriginal = false;
     videoEl.addEventListener('error', () => {
@@ -1516,7 +1752,7 @@
     document.getElementById("fallbackCopyBtn").addEventListener('click', () => copyToClipboard(streamUri));
   }
 
-  function playWebTorrentStream(magnetUri, label, initialSubtitle){
+  function playWebTorrentStream(magnetUri, label, initialSubtitle, context = null){
     if(typeof WebTorrent === 'undefined'){
       showToast("No se pudo cargar WebTorrent (revisá tu conexión a internet)", true);
       return;
@@ -1564,6 +1800,23 @@
           }
         });
 
+        // Eventos para marcar visto si WebTorrent
+        if(context && context.itemId && context.epId){
+          let marked = false;
+          videoEl.addEventListener('timeupdate', () => {
+            if(!marked && videoEl.duration && (videoEl.currentTime / videoEl.duration >= 0.90)){
+              marked = true;
+              toggleWatched(context.itemId, context.epId, true);
+            }
+          });
+          videoEl.addEventListener('ended', () => {
+            if(!marked){
+              marked = true;
+              toggleWatched(context.itemId, context.epId, true);
+            }
+          });
+        }
+
         torrent.on('download', () => updateProgress(torrent));
         updateProgress(torrent);
       });
@@ -1585,6 +1838,8 @@
   }
 
   function cleanupPlayback(){
+    const nextCard = document.getElementById("nextEpCard");
+    if(nextCard) nextCard.remove();
     const videoEl = document.getElementById("playerVideo");
     if(videoEl){
       try {
@@ -1679,7 +1934,8 @@
           subtitle: ep.subtitle || '',
           rawTorrent: ep.rawTorrent || '',
           fileIndex: ep.fileIndex !== undefined ? ep.fileIndex : null,
-          subFileIndex: ep.subFileIndex !== undefined ? ep.subFileIndex : null
+          subFileIndex: ep.subFileIndex !== undefined ? ep.subFileIndex : null,
+          watched: !!ep.watched
         })) : []
       }));
     }
@@ -1695,7 +1951,8 @@
         season: Number(row.season) || 1,
         episode: Number(row.episode) || 1,
         torrent: row.torrent || '',
-        subtitle: row.subtitle || ''
+        subtitle: row.subtitle || '',
+        watched: !!row.watched
       });
     });
     return Object.values(grouped);
