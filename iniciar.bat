@@ -1,0 +1,6 @@
+@echo off
+title Marquesina
+echo Iniciando servidor Marquesina en http://localhost:3333...
+start http://localhost:3333
+node "%~dp0server.js"
+pause

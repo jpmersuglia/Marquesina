@@ -606,8 +606,9 @@
         body += `<div class="episode-row"><span class="ep-title" style="color:var(--text-dim)">Todavía no agregaste episodios.</span></div>`;
       }
       body += `
-        <div class="add-episode-row">
-          <button class="btn btn-sm btn-ghost" data-action="add-ep" data-id="${item.id}">+ Agregar episodio</button>
+        <div class="add-episode-row" style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="btn btn-sm btn-ghost" data-action="add-ep" data-id="${item.id}">+ Agregar episodio manual</button>
+          <button class="btn btn-sm btn-primary" data-action="import-torrent-ep" data-id="${item.id}">${icon('spark')} Importar temporada desde Torrent / Magnet</button>
         </div>
       </div>`;
     } else {
@@ -641,6 +642,7 @@
   function icon(name){
     const icons = {
       play: '<svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M6 4.5L19 12L6 19.5V4.5Z" fill="currentColor"/></svg>',
+      spark: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
       edit: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
       trash: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>',
       close: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>',
@@ -666,6 +668,7 @@
     bindAction('edit-item', (id) => openItemModal(findItem(id)));
     bindAction('delete-item', (id) => confirmDeleteItem(id));
     bindAction('add-ep', (id) => openEpisodeModal(id, null));
+    bindAction('import-torrent-ep', (id) => openTorrentImportModal(id));
     bindAction('edit-ep', (id, epId) => openEpisodeModal(id, epId));
     bindAction('delete-ep', (id, epId) => confirmDeleteEpisode(id, epId));
   }
@@ -860,13 +863,218 @@
     showToast("Episodio eliminado");
   }
 
+  function openTorrentImportModal(itemId){
+    const item = findItem(itemId);
+    if(!item) return;
+    const modalRoot = document.getElementById("modalRoot");
+
+    modalRoot.innerHTML = `
+      <div class="modal-overlay" id="torrentModalOverlay">
+        <div class="modal" style="max-width: 620px;">
+          <h2>Importar temporada desde Torrent / Magnet</h2>
+          <p style="font-size:0.84rem; color:var(--text-dim); margin-top:-10px; margin-bottom:16px;">
+            Serie: <strong style="color:var(--text);">${escapeHtml(item.title)}</strong>. Ingresá el enlace Magnet o hash de la temporada. Marquesina detectará automáticamente los episodios y asociará los subtítulos que vengan incluidos.
+          </p>
+          <div class="field">
+            <label>Enlace Magnet o InfoHash del Torrent</label>
+            <input type="text" id="fTorrentMagnet" placeholder="magnet:?xt=urn:btih:... o C8D2D394AFE520E5905355F470A1C3359816E7AE">
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+            <span id="inspectStatus" style="font-size:0.82rem; color:var(--text-dim);"></span>
+            <button class="btn btn-primary btn-sm" id="btnInspectTorrent">Analizar Torrent</button>
+          </div>
+          <div id="torrentPreviewArea" style="display:none; max-height:280px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; padding:10px; background:var(--surface); margin-bottom:16px;"></div>
+          <div class="modal-actions">
+            <button class="btn btn-ghost" id="torrentCancel">Cancelar</button>
+            <button class="btn btn-primary" id="torrentSave" style="display:none;">Guardar episodios en la serie</button>
+          </div>
+        </div>
+      </div>`;
+
+    const overlay = document.getElementById("torrentModalOverlay");
+    overlay.addEventListener('click', (e) => { if(e.target === overlay) closeModal(); });
+    document.getElementById("torrentCancel").addEventListener('click', closeModal);
+
+    let detectedEpisodes = [];
+    const magnetInput = document.getElementById("fTorrentMagnet");
+    const statusEl = document.getElementById("inspectStatus");
+    const previewEl = document.getElementById("torrentPreviewArea");
+    const saveBtn = document.getElementById("torrentSave");
+    const inspectBtn = document.getElementById("btnInspectTorrent");
+
+    inspectBtn.addEventListener('click', () => {
+      const magnetVal = magnetInput.value.trim();
+      if(!magnetVal){
+        showToast("Pegá un enlace Magnet o infoHash primero", true);
+        return;
+      }
+
+      inspectBtn.disabled = true;
+      inspectBtn.textContent = "Conectando con peers…";
+      statusEl.textContent = "Consultando metadatos en la red P2P (esto puede demorar unos segundos)...";
+      previewEl.style.display = 'none';
+      saveBtn.style.display = 'none';
+
+      const origin = (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+      const inspectUrl = origin + '/api/torrent/inspect?magnet=' + encodeURIComponent(magnetVal);
+
+      fetch(inspectUrl)
+        .then(res => {
+          if(!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(data => {
+          inspectBtn.disabled = false;
+          inspectBtn.textContent = "Analizar Torrent";
+          if(data.error){
+            statusEl.textContent = "Error: " + data.error;
+            showToast(data.error, true);
+            return;
+          }
+
+          const files = data.files || [];
+          const videoRegex = /\.(mp4|mkv|avi|webm|mov|m4v)$/i;
+          const subRegex = /\.(srt|vtt)$/i;
+
+          const videoFiles = files.filter(f => videoRegex.test(f.name));
+          const subFiles = files.filter(f => subRegex.test(f.name));
+
+          if(!videoFiles.length){
+            statusEl.textContent = `Se encontraron ${files.length} archivos, pero ninguno es video compatible.`;
+            return;
+          }
+
+          detectedEpisodes = [];
+          videoFiles.forEach((vf) => {
+            const seMatch = vf.name.match(/[Ss](\d{1,2})[Ee](\d{1,2})/i) || vf.name.match(/(\d{1,2})x(\d{1,2})/i);
+            const season = seMatch ? parseInt(seMatch[1], 10) : 1;
+            const episode = seMatch ? parseInt(seMatch[2], 10) : (detectedEpisodes.length + 1);
+
+            // Buscar subtítulo para este episodio
+            let matchingSub = subFiles.find(sf => {
+              const subMatch = sf.name.match(/[Ss](\d{1,2})[Ee](\d{1,2})/i) || sf.name.match(/(\d{1,2})x(\d{1,2})/i);
+              return subMatch && parseInt(subMatch[1], 10) === season && parseInt(subMatch[2], 10) === episode;
+            });
+
+            // Si el nombre de la carpeta contiene S01E01, buscar también por ruta completa
+            if(!matchingSub){
+              matchingSub = subFiles.find(sf => {
+                const subMatch = sf.path.match(/[Ss](\d{1,2})[Ee](\d{1,2})/i) || sf.path.match(/(\d{1,2})x(\d{1,2})/i);
+                return subMatch && parseInt(subMatch[1], 10) === season && parseInt(subMatch[2], 10) === episode;
+              });
+            }
+
+            detectedEpisodes.push({
+              season,
+              episode,
+              videoFile: vf,
+              subFile: matchingSub || null,
+              torrent: magnetVal,
+              fileIndex: vf.index,
+              subFileIndex: matchingSub ? matchingSub.index : null
+            });
+          });
+
+          detectedEpisodes.sort((a,b) => a.season - b.season || a.episode - b.episode);
+
+          statusEl.textContent = `¡Listo! Se detectaron ${detectedEpisodes.length} episodio(s) en ${data.name || 'el torrent'}.`;
+          let html = `<div style="font-size:0.82rem;">`;
+          detectedEpisodes.forEach(ep => {
+            html += `
+              <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border);">
+                <div>
+                  <strong style="color:var(--amber);">S${ep.season}E${ep.episode}</strong>: ${escapeHtml(ep.videoFile.name)}
+                  <div style="font-size:0.74rem; color:var(--text-dim);">
+                    ${(ep.videoFile.length / (1024*1024)).toFixed(1)} MB
+                    ${ep.subFile ? ` · <span style="color:#9fd6d6;">✓ Subtítulo detectado: ${escapeHtml(ep.subFile.name)}</span>` : ' · <span style="color:var(--text-dim);">(sin subtítulo en torrent)</span>'}
+                  </div>
+                </div>
+              </div>`;
+          });
+          html += `</div>`;
+          previewEl.innerHTML = html;
+          previewEl.style.display = 'block';
+          saveBtn.style.display = '';
+        })
+        .catch(err => {
+          inspectBtn.disabled = false;
+          inspectBtn.textContent = "Analizar Torrent";
+          statusEl.textContent = "Error al conectar con el servidor: " + err.message;
+          showToast("Asegurate de que el servidor esté iniciado con 'iniciar.bat'", true);
+        });
+    });
+
+    saveBtn.addEventListener('click', () => {
+      if(!detectedEpisodes.length) return;
+      item.episodes = item.episodes || [];
+
+      let addedCount = 0;
+      let updatedCount = 0;
+
+      detectedEpisodes.forEach(newEp => {
+        const streamUrl = `/api/torrent/stream?magnet=${encodeURIComponent(newEp.torrent)}&fileIndex=${newEp.fileIndex}`;
+        const subUrl = newEp.subFileIndex !== null
+          ? `/api/torrent/sub?magnet=${encodeURIComponent(newEp.torrent)}&fileIndex=${newEp.subFileIndex}`
+          : '';
+
+        const existingEp = item.episodes.find(e => e.season === newEp.season && e.episode === newEp.episode);
+        if(existingEp){
+          existingEp.torrent = streamUrl;
+          if(subUrl) existingEp.subtitle = subUrl;
+          existingEp.rawTorrent = newEp.torrent;
+          existingEp.fileIndex = newEp.fileIndex;
+          existingEp.subFileIndex = newEp.subFileIndex;
+          updatedCount++;
+        } else {
+          item.episodes.push({
+            id: uid(),
+            season: newEp.season,
+            episode: newEp.episode,
+            torrent: streamUrl,
+            subtitle: subUrl,
+            rawTorrent: newEp.torrent,
+            fileIndex: newEp.fileIndex,
+            subFileIndex: newEp.subFileIndex
+          });
+          addedCount++;
+        }
+      });
+
+      saveLibrary();
+      closeModal();
+      render();
+      showToast(`Temporada importada: ${addedCount} nuevo(s), ${updatedCount} actualizado(s)`);
+    });
+  }
+
   function closeModal(){
     document.getElementById("modalRoot").innerHTML = "";
   }
 
   /* ============ utilidades de streaming y subtítulos ============ */
   function isHttpStream(uri){
-    return /^https?:\/\//i.test((uri || '').trim());
+    const s = (uri || '').trim();
+    return /^https?:\/\//i.test(s) || s.startsWith('/api/');
+  }
+
+  function isMagnet(uri){
+    return /^magnet:\?/i.test((uri || '').trim());
+  }
+
+  // Decodifica buffer con UTF-8 y fallback a Windows-1252 / ISO-8859-1 para caracteres en español (tildes, ñ)
+  function decodeSubtitleText(buffer){
+    if(typeof buffer === 'string') return buffer;
+    try {
+      const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+      return utf8Decoder.decode(buffer);
+    } catch(e){
+      try {
+        const latinDecoder = new TextDecoder('windows-1252');
+        return latinDecoder.decode(buffer);
+      } catch(err){
+        return new TextDecoder('utf-8').decode(buffer);
+      }
+    }
   }
 
   // Convierte subtítulos en formato SubRip (.srt) a formato WebVTT compatible con HTML5
@@ -886,10 +1094,6 @@
   function attachSubtitleToVideo(videoEl, contentOrUrl, filename = "Subtítulos", isRawContent = false){
     if(!videoEl) return;
 
-    // Limpiar pistas anteriores
-    const existingTracks = videoEl.querySelectorAll('track');
-    existingTracks.forEach(t => t.remove());
-
     if(activeSubtitleBlobUrl){
       try{ URL.revokeObjectURL(activeSubtitleBlobUrl); }catch(e){}
       activeSubtitleBlobUrl = null;
@@ -906,40 +1110,145 @@
     const url = (contentOrUrl || '').trim();
     if(!url) return;
 
-    fetch(url)
+    // 1. Soporte para subtítulos desde un Magnet link directo
+    if(isMagnet(url)){
+      loadSubtitleFromMagnet(url, videoEl, filename);
+      return;
+    }
+
+    // 2. Soporte para URLs del motor interno (/api/torrent/sub...)
+    if(url.startsWith('/api/torrent/sub')){
+      const origin = (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+      const directUrl = origin + url;
+      fetch(directUrl)
+        .then(res => {
+          if(!res.ok) throw new Error('API Sub ' + res.status);
+          return res.text();
+        })
+        .then(vttText => {
+          const blob = new Blob([vttText], { type: 'text/vtt;charset=utf-8' });
+          activeSubtitleBlobUrl = URL.createObjectURL(blob);
+          createTrackElement(videoEl, activeSubtitleBlobUrl, filename);
+        })
+        .catch(err => {
+          console.warn("Error cargando subtítulo del torrent interno:", err);
+          showToast("Aguardando subtítulos del torrent...", false);
+        });
+      return;
+    }
+
+    // 3. Soporte para URLs HTTP/HTTPS externas (BitTorrent Web, TorrServer, etc.)
+    // Si el servidor local bridge está activo, usar el endpoint puente que agrega CORS y convierte a WebVTT
+    const origin = (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+    const bridgeUrl = origin + '/api/sub?url=' + encodeURIComponent(url);
+
+    fetch(bridgeUrl)
       .then(res => {
-        if(!res.ok) throw new Error('Status ' + res.status);
+        if(!res.ok) throw new Error('Bridge ' + res.status);
         return res.text();
       })
-      .then(text => {
-        const vtt = srtToVtt(text);
-        const blob = new Blob([vtt], { type: 'text/vtt;charset=utf-8' });
+      .then(vttText => {
+        const blob = new Blob([vttText], { type: 'text/vtt;charset=utf-8' });
         activeSubtitleBlobUrl = URL.createObjectURL(blob);
         createTrackElement(videoEl, activeSubtitleBlobUrl, filename);
       })
-      .catch(err => {
-        console.warn("No se pudo obtener el subtítulo vía fetch (posible CORS), intentando asignación directa:", err);
-        createTrackElement(videoEl, url, filename);
+      .catch(() => {
+        // Fallback: Si el bridge no está corriendo, intentar fetch directo (limpiando credenciales para Firefox)
+        const cleanUrl = sanitizeStreamUrlForBrowser(url);
+        fetch(cleanUrl)
+          .then(res => {
+            if(!res.ok) throw new Error('HTTP ' + res.status);
+            return res.arrayBuffer();
+          })
+          .then(buffer => {
+            const text = decodeSubtitleText(buffer);
+            const vtt = srtToVtt(text);
+            const blob = new Blob([vtt], { type: 'text/vtt;charset=utf-8' });
+            activeSubtitleBlobUrl = URL.createObjectURL(blob);
+            createTrackElement(videoEl, activeSubtitleBlobUrl, filename);
+          })
+          .catch(err => {
+            console.warn("Fallo CORS al cargar subtítulo directamente de BitTorrent Web:", err);
+            showToast("BitTorrent Web bloquea los subtítulos por CORS. Abrí Marquesina con 'iniciar.bat' o arrastrá el .srt al video", true);
+          });
       });
   }
 
-  function createTrackElement(videoEl, src, label){
-    const track = document.createElement('track');
-    track.kind = 'subtitles';
-    track.label = label;
-    track.srclang = 'es';
-    track.src = src;
-    track.default = true;
-    videoEl.appendChild(track);
-
-    setTimeout(() => {
-      if(videoEl.textTracks && videoEl.textTracks.length > 0){
-        for(let i = 0; i < videoEl.textTracks.length; i++){
-          videoEl.textTracks[i].mode = 'showing';
+  function loadSubtitleFromMagnet(magnetUri, videoEl, label = "Subtítulo Magnet"){
+    if(typeof WebTorrent === 'undefined'){
+      showToast("WebTorrent no está cargado", true);
+      return;
+    }
+    showToast("Buscando subtítulo en el enjambre torrent…");
+    const subClient = new WebTorrent();
+    subClient.on('error', (err) => console.warn("Error en cliente de subtítulo torrent:", err));
+    try {
+      subClient.add(magnetUri, (torrent) => {
+        const subFile = torrent.files.find(f => /\.(srt|vtt)$/i.test(f.name));
+        if(!subFile){
+          showToast("No se encontró ningún archivo .srt o .vtt en el magnet", true);
+          try{ subClient.destroy(); }catch(e){}
+          return;
         }
+        subFile.getBuffer((err, buffer) => {
+          if(err){
+            showToast("No se pudo descargar el archivo de subtítulo del torrent", true);
+          } else {
+            const text = decodeSubtitleText(buffer);
+            attachSubtitleToVideo(videoEl, text, subFile.name.replace(/\.[^/.]+$/, ""), true);
+          }
+          try{ subClient.destroy(); }catch(e){}
+        });
+      });
+    } catch(err){
+      console.warn("Error con magnet de subtítulo:", err);
+      showToast("Magnet de subtítulo inválido", true);
+      try{ subClient.destroy(); }catch(e){}
+    }
+  }
+
+  function createTrackElement(videoEl, src, label){
+    if(!videoEl) return;
+
+    // Obtener pista existente o crearla (para que el botón CC nativo de Firefox siempre esté presente)
+    let track = videoEl.querySelector('track');
+    if(!track){
+      track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.srclang = 'es';
+      track.default = true;
+      videoEl.appendChild(track);
+    }
+    track.label = label;
+    track.src = src;
+
+    // En Firefox, el modo 'showing' debe activarse en el evento load del track
+    track.addEventListener('load', function(){
+      if(this.track){
+        this.track.mode = 'showing';
       }
-    }, 150);
-    showToast(`Subtítulo cargado: ${label}`);
+    });
+
+    // Forzar activación del modo showing en Firefox y Chrome en varios intervalos
+    const forceShowing = () => {
+      try {
+        if(track.track){
+          track.track.mode = 'showing';
+        }
+        if(videoEl.textTracks){
+          for(let i = 0; i < videoEl.textTracks.length; i++){
+            videoEl.textTracks[i].mode = 'showing';
+          }
+        }
+      } catch(e){}
+    };
+
+    forceShowing();
+    setTimeout(forceShowing, 50);
+    setTimeout(forceShowing, 250);
+    setTimeout(forceShowing, 800);
+
+    showToast(`Subtítulo activado: ${label}`);
   }
 
   // Los navegadores modernos bloquean subrecursos con formato http://user:pass@host/ por política de seguridad RFC 3986.
@@ -958,11 +1267,15 @@
 
   function launchInExternalPlayer(streamUrl, title, subtitleUrl){
     const cleanTitle = (title || 'Stream').replace(/[\r\n]/g, ' ');
+    const origin = (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+    const absStreamUrl = streamUrl.startsWith('/') ? origin + streamUrl : streamUrl;
+    const absSubUrl = (subtitleUrl && subtitleUrl.startsWith('/')) ? origin + subtitleUrl : subtitleUrl;
+
     let m3uContent = `#EXTM3U\n#EXTINF:-1,${cleanTitle}\n`;
-    if(subtitleUrl && isHttpStream(subtitleUrl)){
-      m3uContent += `#EXTVLCOPT:sub-file=${subtitleUrl.trim()}\n`;
+    if(absSubUrl && isHttpStream(absSubUrl)){
+      m3uContent += `#EXTVLCOPT:sub-file=${absSubUrl.trim()}\n`;
     }
-    m3uContent += `${streamUrl}\n`;
+    m3uContent += `${absStreamUrl}\n`;
     const blob = new Blob([m3uContent], { type: 'audio/x-mpegurl' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1093,7 +1406,8 @@
     function loadSubtitleFromFile(file){
       const reader = new FileReader();
       reader.onload = (ev) => {
-        const text = ev.target.result;
+        const buffer = ev.target.result;
+        const text = decodeSubtitleText(buffer);
         const videoEl = document.getElementById("playerVideo");
         if(videoEl){
           attachSubtitleToVideo(videoEl, text, file.name.replace(/\.[^/.]+$/, ""), true);
@@ -1101,7 +1415,7 @@
           showToast("Aguardá a que el reproductor inicie...", true);
         }
       };
-      reader.readAsText(file, 'utf-8');
+      reader.readAsArrayBuffer(file);
     }
 
     cleanupPlayback();
@@ -1120,13 +1434,20 @@
     const cleanUrl = sanitizeStreamUrlForBrowser(streamUri);
 
     body.innerHTML = `
-      <video id="playerVideo" controls autoplay playsinline style="display:none;"></video>
+      <video id="playerVideo" controls autoplay playsinline style="display:none;">
+        <track kind="subtitles" label="Español" srclang="es" default>
+      </video>
       <div class="player-status" id="playerLoadingStatus">
         Conectando con el servidor de streaming…
       </div>`;
 
     const videoEl = document.getElementById("playerVideo");
     const loadingEl = document.getElementById("playerLoadingStatus");
+
+    // Iniciar carga del subtítulo de inmediato para que esté disponible en cuanto el video comience
+    if(initialSubtitle){
+      attachSubtitleToVideo(videoEl, initialSubtitle, "Subtítulo");
+    }
 
     let hasDisplayed = false;
     function revealVideo(){
@@ -1136,12 +1457,16 @@
         if(loadingEl && loadingEl.parentNode){
           loadingEl.parentNode.removeChild(loadingEl);
         }
-        if(initialSubtitle){
-          attachSubtitleToVideo(videoEl, initialSubtitle, "Subtítulo");
+        // En Firefox y Chrome, forzar modo showing al revelarse el video
+        if(videoEl.textTracks){
+          for(let i = 0; i < videoEl.textTracks.length; i++){
+            videoEl.textTracks[i].mode = 'showing';
+          }
         }
       }
     }
 
+    videoEl.addEventListener('loadedmetadata', revealVideo);
     videoEl.addEventListener('loadeddata', revealVideo);
     videoEl.addEventListener('canplay', revealVideo);
     videoEl.addEventListener('playing', revealVideo);
@@ -1216,12 +1541,26 @@
         }
 
         const body = document.getElementById("playerBody");
-        body.innerHTML = `<video id="playerVideo" controls autoplay playsinline></video>`;
+        body.innerHTML = `<video id="playerVideo" controls autoplay playsinline><track kind="subtitles" label="Español" srclang="es" default></video>`;
         const videoEl = document.getElementById("playerVideo");
         file.renderTo(videoEl, { autoplay: true }, (err) => {
-          if(err) showToast("No se pudo renderizar el archivo: " + err.message, true);
-          else if(initialSubtitle){
-            attachSubtitleToVideo(videoEl, initialSubtitle, "Subtítulo");
+          if(err) {
+            showToast("No se pudo renderizar el archivo: " + err.message, true);
+          } else {
+            if(initialSubtitle){
+              attachSubtitleToVideo(videoEl, initialSubtitle, "Subtítulo");
+            } else {
+              // Si no se configuró subtítulo manual, buscar si el mismo torrent incluye uno
+              const autoSub = torrent.files.find(f => /\.(srt|vtt)$/i.test(f.name));
+              if(autoSub){
+                autoSub.getBuffer((subErr, buffer) => {
+                  if(!subErr && buffer){
+                    const text = decodeSubtitleText(buffer);
+                    attachSubtitleToVideo(videoEl, text, autoSub.name.replace(/\.[^/.]+$/, ""), true);
+                  }
+                });
+              }
+            }
           }
         });
 
@@ -1337,7 +1676,10 @@
           season: Number(ep.season) || 1,
           episode: Number(ep.episode) || 1,
           torrent: ep.torrent || '',
-          subtitle: ep.subtitle || ''
+          subtitle: ep.subtitle || '',
+          rawTorrent: ep.rawTorrent || '',
+          fileIndex: ep.fileIndex !== undefined ? ep.fileIndex : null,
+          subFileIndex: ep.subFileIndex !== undefined ? ep.subFileIndex : null
         })) : []
       }));
     }
