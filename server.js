@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const torrentStream = require('torrent-stream');
+const parseTorrent = require('parse-torrent');
 
 const PORT = process.env.PORT || 3333;
 
@@ -19,7 +20,7 @@ const DEFAULT_TRACKERS = [
   'http://tracker.openbittorrent.com:80/announce'
 ];
 
-// Almacén de motores torrent activos en memoria: infoHash -> { engine, lastAccess, files }
+// Almacén de motores torrent activos en memoria: infoHash -> { engine, lastAccess, activeStreams, files }
 const activeEngines = new Map();
 
 function getTorrentEngine(magnetOrHash) {
@@ -28,9 +29,16 @@ function getTorrentEngine(magnetOrHash) {
     magnet = 'magnet:?xt=urn:btih:' + magnet;
   }
 
-  // Extraer infoHash normalizado (40 hex)
-  const match = magnet.match(/urn:btih:([a-zA-Z0-9]+)/i);
-  const infoHash = match ? match[1].toLowerCase() : null;
+  // Extraer infoHash canónico normalizado (40 caracteres hex)
+  let infoHash;
+  try {
+    const parsed = parseTorrent(magnet);
+    infoHash = (parsed.infoHash || '').toLowerCase();
+  } catch (e) {
+    const match = magnet.match(/urn:btih:([a-zA-Z0-9]+)/i);
+    infoHash = match ? match[1].toLowerCase() : null;
+  }
+
   if (!infoHash) {
     throw new Error('Enlace magnet o infoHash inválido');
   }
@@ -41,9 +49,14 @@ function getTorrentEngine(magnetOrHash) {
     return entry;
   }
 
+  console.log(`[Torrent] Inicializando motor torrent: ${infoHash}`);
+
   const engine = torrentStream(magnet, {
     tmp: os.tmpdir(),
-    trackers: DEFAULT_TRACKERS
+    trackers: DEFAULT_TRACKERS,
+    verify: false, // CLAVE: No verificar piezas en disco al inicio (reduce carga de 5 min a 200ms)
+    uploads: 0,
+    connections: 60
   });
 
   try {
@@ -55,12 +68,17 @@ function getTorrentEngine(magnetOrHash) {
     engine,
     ready: false,
     lastAccess: Date.now(),
+    activeStreams: 0,
     files: []
   };
 
   engine.on('ready', () => {
     entry.ready = true;
     entry.files = engine.files;
+    // Deseleccionar todos los archivos para evitar descargas en segundo plano de episodios no solicitados
+    engine.files.forEach(f => {
+      try { f.deselect(); } catch(e) {}
+    });
     console.log(`[Torrent] Listo: "${engine.torrent ? engine.torrent.name : infoHash}" (${engine.files.length} archivos)`);
   });
 
@@ -72,11 +90,11 @@ function getTorrentEngine(magnetOrHash) {
   return entry;
 }
 
-// Limpieza automática de torrents inactivos (> 40 minutos sin streaming) para liberar RAM y sockets
+// Limpieza automática de torrents verdaderamente inactivos (> 3 horas sin uso ni streams activos)
 setInterval(() => {
   const now = Date.now();
   for (const [hash, entry] of activeEngines.entries()) {
-    if (now - entry.lastAccess > 40 * 60 * 1000) {
+    if ((entry.activeStreams || 0) === 0 && (now - entry.lastAccess > 3 * 60 * 60 * 1000)) {
       console.log(`[Torrent] Liberando motor inactivo: ${hash}`);
       try {
         entry.engine.destroy(() => {});
@@ -84,7 +102,7 @@ setInterval(() => {
       activeEngines.delete(hash);
     }
   }
-}, 5 * 60 * 1000);
+}, 10 * 60 * 1000);
 
 function srtToVtt(srtText) {
   if (!srtText) return "WEBVTT\n\n";
@@ -152,11 +170,11 @@ const server = http.createServer((req, res) => {
       if (entry.ready) {
         onReady();
       } else {
-        // Esperar hasta 25 segundos para obtener metadatos de los peers
+        // Esperar hasta 45 segundos para obtener metadatos de los peers
         const timer = setTimeout(() => {
           res.writeHead(504, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Tiempo de espera agotado buscando metadatos del torrent en la red' }));
-        }, 25000);
+        }, 45000);
 
         entry.engine.once('ready', () => {
           clearTimeout(timer);
@@ -189,6 +207,9 @@ const server = http.createServer((req, res) => {
           return;
         }
 
+        entry.activeStreams = (entry.activeStreams || 0) + 1;
+        entry.lastAccess = Date.now();
+
         const ext = path.extname(file.name).toLowerCase();
         let mime = 'video/mp4';
         if (ext === '.mkv') mime = 'video/x-matroska';
@@ -214,7 +235,12 @@ const server = http.createServer((req, res) => {
 
           const stream = file.createReadStream({ start, end });
           stream.pipe(res);
+          stream.on('data', () => {
+            entry.lastAccess = Date.now();
+          });
           res.on('close', () => {
+            entry.activeStreams = Math.max(0, (entry.activeStreams || 1) - 1);
+            entry.lastAccess = Date.now();
             try { stream.destroy(); } catch(e) {}
           });
         } else {
@@ -227,7 +253,12 @@ const server = http.createServer((req, res) => {
 
           const stream = file.createReadStream();
           stream.pipe(res);
+          stream.on('data', () => {
+            entry.lastAccess = Date.now();
+          });
           res.on('close', () => {
+            entry.activeStreams = Math.max(0, (entry.activeStreams || 1) - 1);
+            entry.lastAccess = Date.now();
             try { stream.destroy(); } catch(e) {}
           });
         }
@@ -239,7 +270,7 @@ const server = http.createServer((req, res) => {
         const timer = setTimeout(() => {
           res.writeHead(504, { 'Content-Type': 'text/plain' });
           res.end('Tiempo de espera agotado buscando archivo en la red torrent');
-        }, 30000);
+        }, 60000);
 
         entry.engine.once('ready', () => {
           clearTimeout(timer);
