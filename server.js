@@ -126,6 +126,41 @@ function decodeText(buffer) {
   }
 }
 
+// Calcula el progreso de descarga de un archivo específico del torrent
+// usando el bitfield (mapa de piezas descargadas del motor).
+function getFileProgress(entry, fileIndex) {
+  if (!entry || !entry.ready || !entry.engine || !entry.engine.torrent || !entry.engine.bitfield) {
+    return { engineReady: false, percent: 0, downloadedPieces: 0, totalPieces: 0 };
+  }
+  const file = entry.engine.files[fileIndex];
+  if (!file) {
+    return { engineReady: true, percent: 0, downloadedPieces: 0, totalPieces: 0, error: 'fileIndex fuera de rango' };
+  }
+  const torrent = entry.engine.torrent;
+  const pieceLength = torrent.pieceLength;
+  const startPiece = Math.floor(file.offset / pieceLength);
+  const endPiece = Math.floor((file.offset + file.length - 1) / pieceLength);
+  const totalPieces = endPiece - startPiece + 1;
+  let downloadedPieces = 0;
+  for (let i = startPiece; i <= endPiece; i++) {
+    if (entry.engine.bitfield.get(i)) downloadedPieces++;
+  }
+  const speed = (entry.engine.swarm && typeof entry.engine.swarm.downloadSpeed === 'function')
+    ? entry.engine.swarm.downloadSpeed()
+    : 0;
+  return {
+    engineReady: true,
+    percent: totalPieces > 0 ? Math.round(downloadedPieces / totalPieces * 100) : 0,
+    downloadedPieces,
+    totalPieces,
+    downloadedMB: parseFloat((downloadedPieces * pieceLength / (1024 * 1024)).toFixed(1)),
+    totalMB: parseFloat((file.length / (1024 * 1024)).toFixed(1)),
+    speedKBps: Math.round(speed / 1024),
+    prebuffering: entry.prebuffering ? entry.prebuffering.has(fileIndex) : false
+  };
+}
+
+
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
@@ -184,6 +219,103 @@ const server = http.createServer((req, res) => {
     } catch(err) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ==========================================
+  // API: Progreso de descarga de un archivo de torrent
+  // GET /api/torrent/progress?magnet=...&fileIndex=N
+  // ==========================================
+  if (req.url.startsWith('/api/torrent/progress?')) {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const magnet = parsedUrl.searchParams.get('magnet');
+    const fileIndex = parseInt(parsedUrl.searchParams.get('fileIndex') || '0', 10);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+    try {
+      const parsed = parseTorrent(magnet || '');
+      const infoHash = (parsed.infoHash || '').toLowerCase();
+      if (!infoHash || !activeEngines.has(infoHash)) {
+        res.end(JSON.stringify({ engineReady: false, percent: 0, speedKBps: 0, prebuffering: false }));
+      } else {
+        const entry = activeEngines.get(infoHash);
+        res.end(JSON.stringify(getFileProgress(entry, fileIndex)));
+      }
+    } catch (err) {
+      res.end(JSON.stringify({ engineReady: false, percent: 0, speedKBps: 0, error: err.message }));
+    }
+    return;
+  }
+
+  // ==========================================
+  // API: Pre-buffer de los primeros N bytes de un archivo de torrent
+  // GET /api/torrent/prebuffer?magnet=...&fileIndex=N&bytes=N
+  // Inicia la descarga anticipada sin bloquear. Responde inmediatamente.
+  // ==========================================
+  if (req.url.startsWith('/api/torrent/prebuffer?')) {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const magnet = parsedUrl.searchParams.get('magnet');
+    const fileIndex = parseInt(parsedUrl.searchParams.get('fileIndex') || '0', 10);
+    const prebufferBytes = parseInt(parsedUrl.searchParams.get('bytes') || String(60 * 1024 * 1024), 10); // 60 MB por defecto
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+
+    try {
+      const entry = getTorrentEngine(magnet);
+
+      const doPrebuffer = () => {
+        const file = entry.engine.files[fileIndex];
+        if (!file) { res.end(JSON.stringify({ ok: false, error: 'fileIndex fuera de rango' })); return; }
+
+        // Evitar arrancar un prebuffer duplicado para el mismo archivo
+        if (!entry.prebuffering) entry.prebuffering = new Set();
+        if (entry.prebuffering.has(fileIndex)) {
+          res.end(JSON.stringify({ ok: true, alreadyRunning: true }));
+          return;
+        }
+
+        const progress = getFileProgress(entry, fileIndex);
+        if (progress.percent >= 100) {
+          res.end(JSON.stringify({ ok: true, alreadyDone: true, percent: 100 }));
+          return;
+        }
+
+        entry.prebuffering.add(fileIndex);
+        entry.lastAccess = Date.now();
+
+        const endByte = Math.min(prebufferBytes, file.length) - 1;
+        let stream;
+        try {
+          stream = file.createReadStream({ start: 0, end: endByte });
+        } catch (e) {
+          entry.prebuffering.delete(fileIndex);
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+          return;
+        }
+
+        // Drenar el stream (sin guardar en memoria) para forzar la descarga de piezas
+        stream.resume();
+        stream.on('end', () => {
+          entry.prebuffering.delete(fileIndex);
+          console.log(`[Torrent] Prebuffer completo: fileIndex=${fileIndex}, ${(endByte / 1024 / 1024).toFixed(1)} MB`);
+        });
+        stream.on('error', (err) => {
+          entry.prebuffering.delete(fileIndex);
+          console.warn(`[Torrent] Prebuffer error fileIndex=${fileIndex}:`, err.message);
+        });
+
+        console.log(`[Torrent] Iniciando prebuffer fileIndex=${fileIndex}, primeros ${(endByte / 1024 / 1024).toFixed(1)} MB`);
+        res.end(JSON.stringify({ ok: true, started: true, bytes: endByte + 1 }));
+      };
+
+      if (entry.ready) {
+        doPrebuffer();
+      } else {
+        entry.engine.once('ready', doPrebuffer);
+        res.end(JSON.stringify({ ok: true, waitingForReady: true }));
+      }
+    } catch (err) {
+      res.end(JSON.stringify({ ok: false, error: err.message }));
     }
     return;
   }

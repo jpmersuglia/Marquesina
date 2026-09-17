@@ -502,6 +502,81 @@
   }
   .toast.error{ border-color: var(--danger); color: #f0b3b3; }
 
+  /* Barra de progreso de descarga por episodio */
+  .ep-buffer{
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 6px 40px; /* indent alineado con el ep-title */
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+  .ep-buffer.visible{ display: flex; }
+  .ep-buffer-track{
+    flex: 1;
+    max-width: 180px;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .ep-buffer-fill{
+    height: 100%;
+    background: var(--amber);
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+  .ep-buffer-fill.done{ background: #4cd964; }
+  .ep-buffer-label{
+    white-space: nowrap;
+    min-width: 42px;
+    color: var(--amber);
+    font-weight: 600;
+  }
+  .ep-buffer-label.done{ color: #4cd964; }
+  .ep-buffer-speed{ color: var(--text-dim); }
+
+  /* Panel de buffer en el reproductor */
+  .player-buffer-panel{
+    position: absolute;
+    top: 62px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 24px;
+    background: rgba(14,15,22,0.72);
+    backdrop-filter: blur(4px);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    z-index: 215;
+    pointer-events: none;
+  }
+  .player-buffer-item{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .player-buffer-item-label{ min-width: 160px; }
+  .player-buf-track{
+    width: 140px;
+    height: 3px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .player-buf-fill{
+    height: 100%;
+    background: var(--amber);
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+  .player-buf-fill.done{ background: #4cd964; }
+  .player-buf-pct{ color: var(--amber); font-weight: 600; min-width: 36px; }
+  .player-buf-pct.done{ color: #4cd964; }
+  .player-buf-speed{ color: var(--text-dim); }
+
   input[type="file"]{ display:none; }
 
   @media (max-width: 640px){
@@ -554,6 +629,67 @@
   let searchTerm = "";
   let torrentClient = null;
   let activeTorrent = null;
+
+  // Mapa de progreso de buffer torrent: key = `${magnet}::${fileIndex}` → { percent, speedKBps, prebuffering }
+  const torrentProgress = new Map();
+  let progressPollingInterval = null;
+  const API_ORIGIN = () => (window.location.protocol.startsWith('http') && window.location.origin) ? window.location.origin : 'http://127.0.0.1:3333';
+
+  // Parsea una URL /api/torrent/stream?magnet=...&fileIndex=N en { magnet, fileIndex }
+  function parseTorrentStreamUrl(url) {
+    if (!url || !url.startsWith('/api/torrent/')) return null;
+    try {
+      const u = new URL(API_ORIGIN() + url);
+      const magnet = u.searchParams.get('magnet');
+      const fileIndex = parseInt(u.searchParams.get('fileIndex') || '0', 10);
+      if (!magnet) return null;
+      return { magnet, fileIndex };
+    } catch(e) { return null; }
+  }
+
+  // Inicia el prebuffer de un episodio (60MB por defecto) en el servidor
+  function triggerPrebuffer(torrentUrl, label) {
+    const info = parseTorrentStreamUrl(torrentUrl);
+    if (!info) return;
+    const url = `${API_ORIGIN()}/api/torrent/prebuffer?magnet=${encodeURIComponent(info.magnet)}&fileIndex=${info.fileIndex}`;
+    fetch(url).then(r => r.json()).then(d => {
+      if (d.started) console.log(`[Prebuffer] Iniciado: ${label || torrentUrl}`);
+    }).catch(() => {});
+  }
+
+  // Aplica los datos de progreso torrent guardados en torrentProgress a los elementos del DOM
+  function applyTorrentProgress() {
+    torrentProgress.forEach((data, key) => {
+      const [magnet, fileIndexStr] = key.split('::');
+      const fileIndex = parseInt(fileIndexStr, 10);
+      // Actualizar barra en lista de episodios
+      const row = document.querySelector(`[data-torrent-key="${CSS.escape(key)}"]`);
+      if (row) {
+        const barEl = row.querySelector('.ep-buffer');
+        if (barEl) {
+          if (!data.engineReady && data.percent === 0) {
+            barEl.classList.remove('visible');
+            return;
+          }
+          barEl.classList.add('visible');
+          const fill = barEl.querySelector('.ep-buffer-fill');
+          const lbl = barEl.querySelector('.ep-buffer-label');
+          const spd = barEl.querySelector('.ep-buffer-speed');
+          if (fill) {
+            fill.style.width = data.percent + '%';
+            fill.classList.toggle('done', data.percent >= 100);
+          }
+          if (lbl) {
+            lbl.textContent = data.percent >= 100 ? '✓ Listo' : data.percent + '%';
+            lbl.classList.toggle('done', data.percent >= 100);
+          }
+          if (spd) {
+            spd.textContent = data.percent >= 100 ? '' : (data.speedKBps > 0 ? `${data.speedKBps} KB/s` : 'Conectando…');
+          }
+        }
+      }
+    });
+  }
 
   function loadLibrary(){
     try{
@@ -647,6 +783,7 @@
     html += `</div>`;
     gridWrap.innerHTML = html;
     attachGridEvents();
+    applyTorrentProgress();
   }
 
   function renderExpandPanel(item){
@@ -671,8 +808,10 @@
         body += `<div class="season-row"><span class="sprocket"></span> TEMPORADA ${seasonNum}</div>`;
         seasons[seasonNum].forEach(ep => {
           const isWatched = !!ep.watched;
+          const epTorrentInfo = parseTorrentStreamUrl(ep.torrent || '');
+          const torrentKey = epTorrentInfo ? `${epTorrentInfo.magnet}::${epTorrentInfo.fileIndex}` : '';
           body += `
-            <div class="episode-row ${isWatched ? 'is-watched' : ''}">
+            <div class="episode-row ${isWatched ? 'is-watched' : ''}" ${torrentKey ? `data-torrent-key="${escapeHtml(torrentKey)}"` : ''}>
               <button class="icon-btn check ${isWatched ? 'active' : ''}" title="${isWatched ? 'Marcar como no visto' : 'Marcar como visto'}" data-action="toggle-watched" data-id="${item.id}" data-ep="${ep.id}">${icon('check')}</button>
               <span class="ep-num">E${String(ep.episode).padStart(2,'0')}</span>
               <span class="ep-title">${escapeHtml(item.title)} · S${ep.season}E${ep.episode}</span>
@@ -681,7 +820,13 @@
                 <button class="icon-btn" title="Editar episodio" data-action="edit-ep" data-id="${item.id}" data-ep="${ep.id}">${icon('edit')}</button>
                 <button class="icon-btn danger" title="Eliminar episodio" data-action="delete-ep" data-id="${item.id}" data-ep="${ep.id}">${icon('trash')}</button>
               </div>
-            </div>`;
+            </div>
+            ${torrentKey ? `
+            <div class="ep-buffer" style="display:none;">
+              <div class="ep-buffer-track"><div class="ep-buffer-fill" style="width:0%"></div></div>
+              <span class="ep-buffer-label">0%</span>
+              <span class="ep-buffer-speed"></span>
+            </div>` : ''}`;
         });
       });
       if(!episodes.length){
@@ -1468,6 +1613,20 @@
             <button class="icon-btn" id="playerClose" title="Cerrar">${icon('close')}</button>
           </div>
         </div>
+        <div class="player-buffer-panel" id="playerBufferPanel" style="display:none;">
+          <div class="player-buffer-item" id="playerBufCurrent" style="display:none;">
+            <span class="player-buffer-item-label" id="playerBufCurrentLabel">▼ Episodio actual</span>
+            <div class="player-buf-track"><div class="player-buf-fill" id="playerBufCurrentFill" style="width:0%"></div></div>
+            <span class="player-buf-pct" id="playerBufCurrentPct">0%</span>
+            <span class="player-buf-speed" id="playerBufCurrentSpd"></span>
+          </div>
+          <div class="player-buffer-item" id="playerBufNext" style="display:none;">
+            <span class="player-buffer-item-label" id="playerBufNextLabel">⏭ Siguiente episodio</span>
+            <div class="player-buf-track"><div class="player-buf-fill" id="playerBufNextFill" style="width:0%"></div></div>
+            <span class="player-buf-pct" id="playerBufNextPct">0%</span>
+            <span class="player-buf-speed" id="playerBufNextSpd"></span>
+          </div>
+        </div>
         <div class="player-body" id="playerBody">
           ${isHttp ? `
             <div class="player-status" id="playerStatus">
@@ -1627,6 +1786,61 @@
       nextEpisode = findNextEpisode(context.itemId, context.epId);
     }
 
+    // ── Prebuffer + polling de progreso ───────────────────────────────────
+    // 1. Prebuffer del siguiente episodio al arrancar el actual
+    if(nextEpisode && nextEpisode.torrent){
+      triggerPrebuffer(nextEpisode.torrent, `S${nextEpisode.season}E${nextEpisode.episode} (siguiente)`);
+    }
+
+    // 2. Helper para actualizar el panel de buffer en el reproductor
+    function updatePlayerBufUI(slot, data) {
+      // slot = 'current' | 'next'
+      const panel = document.getElementById('playerBufferPanel');
+      const row   = document.getElementById(`playerBuf${slot === 'current' ? 'Current' : 'Next'}`);
+      const fill  = document.getElementById(`playerBuf${slot === 'current' ? 'Current' : 'Next'}Fill`);
+      const pct   = document.getElementById(`playerBuf${slot === 'current' ? 'Current' : 'Next'}Pct`);
+      const spd   = document.getElementById(`playerBuf${slot === 'current' ? 'Current' : 'Next'}Spd`);
+      if(!row) return;
+      const done = data.percent >= 100;
+      row.style.display = 'flex';
+      if(panel) panel.style.display = 'flex';
+      if(fill){ fill.style.width = data.percent + '%'; fill.classList.toggle('done', done); }
+      if(pct){ pct.textContent = done ? '✓' : data.percent + '%'; pct.classList.toggle('done', done); }
+      if(spd){ spd.textContent = done ? '' : (data.speedKBps > 0 ? `${data.speedKBps} KB/s` : 'Conectando…'); }
+      if(done){ setTimeout(() => { if(row) row.style.display='none'; const p = document.getElementById('playerBufferPanel'); if(p && !p.querySelector('[style*="flex"]')) p.style.display='none'; }, 3000); }
+    }
+
+    // 3. Arrancar polling de progreso cada 2.5 segundos
+    if(progressPollingInterval) clearInterval(progressPollingInterval);
+    const currentInfo = parseTorrentStreamUrl(streamUri);
+    const nextInfo    = nextEpisode ? parseTorrentStreamUrl(nextEpisode.torrent || '') : null;
+
+    if(currentInfo || nextInfo){
+      const poll = () => {
+        if(currentInfo){
+          fetch(`${API_ORIGIN()}/api/torrent/progress?magnet=${encodeURIComponent(currentInfo.magnet)}&fileIndex=${currentInfo.fileIndex}`)
+            .then(r => r.json())
+            .then(d => {
+              torrentProgress.set(`${currentInfo.magnet}::${currentInfo.fileIndex}`, d);
+              updatePlayerBufUI('current', d);
+              applyTorrentProgress();
+            }).catch(() => {});
+        }
+        if(nextInfo){
+          fetch(`${API_ORIGIN()}/api/torrent/progress?magnet=${encodeURIComponent(nextInfo.magnet)}&fileIndex=${nextInfo.fileIndex}`)
+            .then(r => r.json())
+            .then(d => {
+              torrentProgress.set(`${nextInfo.magnet}::${nextInfo.fileIndex}`, d);
+              updatePlayerBufUI('next', d);
+              applyTorrentProgress();
+            }).catch(() => {});
+        }
+      };
+      poll(); // primera llamada inmediata
+      progressPollingInterval = setInterval(poll, 2500);
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     videoEl.addEventListener('timeupdate', () => {
       if(!videoEl.duration || isNaN(videoEl.duration)) return;
 
@@ -1640,6 +1854,7 @@
       if(context && nextEpisode && !autoPlayCancelled){
         const remaining = videoEl.duration - videoEl.currentTime;
         if(remaining <= 10 && remaining > 0){
+
           // Pre-fetch del siguiente episodio para acelerar carga
           if(!prefetchDone){
             prefetchDone = true;
@@ -1859,6 +2074,11 @@
     if(torrentClient){
       try{ torrentClient.destroy(); }catch(e){}
       torrentClient = null;
+    }
+    // Detener el polling de progreso de buffer al cerrar el reproductor
+    if(progressPollingInterval){
+      clearInterval(progressPollingInterval);
+      progressPollingInterval = null;
     }
   }
 
